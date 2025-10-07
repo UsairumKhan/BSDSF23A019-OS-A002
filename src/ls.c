@@ -1,9 +1,13 @@
 /*
-* Programming Assignment 02: ls-v1.4.0
-* Feature Added: Alphabetical Sort (Case-Insensitive)
-* Extends ls-v1.3.0 while retaining -l (long listing),
-* column display, and horizontal (-x) features.
-*/
+ * Programming Assignment 02: ls-v1.5.0 (colorized)
+ * Compatible with single-file Makefile (SRC=src/ls.c, OBJ=obj/ls.o, BIN=bin/ls)
+ *
+ * Features:
+ *  - sorted (case-insensitive)
+ *  - long listing (-l)
+ *  - horizontal across display (-x)
+ *  - colorized output (dirs/executables/links)
+ */
 
 #define _XOPEN_SOURCE 700
 #include <stdio.h>
@@ -11,7 +15,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <string.h>
-#include <strings.h>   // for strcasecmp()
+#include <strings.h>   /* strcasecmp */
 #include <errno.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -24,22 +28,27 @@
 
 extern int errno;
 
-/* --- Function Prototypes --- */
+/* prototypes */
 void do_ls(const char *dir, int long_format, int horizontal);
 void print_long_listing(const char *dir);
 void print_permissions(mode_t mode);
 void print_columns(const char *dir);
 void print_horizontal(const char *dir);
 int cmpstringp(const void *a, const void *b);
+void print_colored_name(const char *path, const char *name);
 
-/* -------------------- main() -------------------- */
+/* ANSI color codes */
+#define COLOR_DIR   "\033[1;34m"
+#define COLOR_EXE   "\033[1;32m"
+#define COLOR_LINK  "\033[1;36m"
+#define COLOR_RESET "\033[0m"
+
 int main(int argc, char const *argv[])
 {
     int long_format = 0;
     int horizontal = 0;
     int opt;
 
-    // Parse -l and -x options
     while ((opt = getopt(argc, (char * const *)argv, "lx")) != -1)
     {
         switch (opt)
@@ -52,7 +61,6 @@ int main(int argc, char const *argv[])
         }
     }
 
-    // No directory provided → use current directory
     if (optind == argc)
         do_ls(".", long_format, horizontal);
     else
@@ -68,10 +76,7 @@ int main(int argc, char const *argv[])
     return 0;
 }
 
-/* -------------------- cmpstringp() --------------------
- * Case-insensitive alphabetical comparator for qsort()
- * Also deterministic: prefers lowercase over uppercase if same letters
- */
+/* case-insensitive comparator with deterministic tie-breaker */
 int cmpstringp(const void *a, const void *b)
 {
     const char *pa = *(const char * const *)a;
@@ -80,12 +85,39 @@ int cmpstringp(const void *a, const void *b)
     int r = strcasecmp(pa, pb);
     if (r != 0)
         return r;
-
-    // Tie-breaker for deterministic order
     return strcmp(pa, pb);
 }
 
-/* -------------------- do_ls() -------------------- */
+/* print colored name based on file type/perm */
+void print_colored_name(const char *path, const char *name)
+{
+    struct stat sb;
+    char fullpath[1024];
+
+    /* build path/name */
+    if (snprintf(fullpath, sizeof(fullpath), "%s/%s", path, name) >= (int)sizeof(fullpath)) {
+        /* path too long: just print name without color */
+        printf("%s", name);
+        return;
+    }
+
+    if (lstat(fullpath, &sb) == -1) {
+        /* if lstat fails, print plain */
+        printf("%s", name);
+        return;
+    }
+
+    if (S_ISDIR(sb.st_mode))
+        printf(COLOR_DIR "%s" COLOR_RESET, name);
+    else if (S_ISLNK(sb.st_mode))
+        printf(COLOR_LINK "%s" COLOR_RESET, name);
+    else if (sb.st_mode & S_IXUSR)
+        printf(COLOR_EXE "%s" COLOR_RESET, name);
+    else
+        printf("%s", name);
+}
+
+/* driver */
 void do_ls(const char *dir, int long_format, int horizontal)
 {
     if (long_format)
@@ -96,7 +128,7 @@ void do_ls(const char *dir, int long_format, int horizontal)
         print_columns(dir);
 }
 
-/* -------------------- print_permissions() -------------------- */
+/* prints perms like ls -l */
 void print_permissions(mode_t mode)
 {
     char perms[11];
@@ -114,117 +146,55 @@ void print_permissions(mode_t mode)
     printf("%s ", perms);
 }
 
-/* -------------------- print_long_listing() -------------------- */
+/* ---------------- long listing (sorted) ---------------- */
 void print_long_listing(const char *dir)
 {
-    struct dirent *entry;
     DIR *dp = opendir(dir);
-    if (!dp)
-    {
-        fprintf(stderr, "Cannot open directory: %s\n", dir);
-        return;
-    }
+    if (!dp) { perror("opendir"); return; }
 
-    // Read all filenames first
+    struct dirent *entry;
     char **files = NULL;
     int count = 0;
-    while ((entry = readdir(dp)) != NULL)
-    {
-        if (entry->d_name[0] == '.')
-            continue;
-        files = realloc(files, sizeof(char*) * (count + 1));
+
+    while ((entry = readdir(dp)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char **tmp = realloc(files, sizeof(char*) * (count + 1));
+        if (!tmp) { perror("realloc"); /* cleanup */ for (int i=0;i<count;i++) free(files[i]); free(files); closedir(dp); return; }
+        files = tmp;
         files[count] = strdup(entry->d_name);
+        if (!files[count]) { perror("strdup"); /* cleanup */ for (int i=0;i<count;i++) free(files[i]); free(files); closedir(dp); return; }
         count++;
     }
     closedir(dp);
 
-    // Sort alphabetically (case-insensitive)
-    qsort(files, count, sizeof(char*), cmpstringp);
+    if (count > 0)
+        qsort(files, count, sizeof(char*), cmpstringp);
 
-    // Display details
-    char path[1024];
     struct stat sb;
-    for (int i = 0; i < count; i++)
-    {
+    char path[1024];
+
+    for (int i = 0; i < count; i++) {
         snprintf(path, sizeof(path), "%s/%s", dir, files[i]);
-        if (lstat(path, &sb) == -1)
-        {
-            perror("stat");
+        if (lstat(path, &sb) == -1) { /* if stat fails just show name */ 
+            printf("%s\n", files[i]);
             continue;
         }
 
         print_permissions(sb.st_mode);
-        printf("%2ld ", sb.st_nlink);
+        printf("%2ld ", (long)sb.st_nlink);
 
         struct passwd *pw = getpwuid(sb.st_uid);
         struct group *gr = getgrgid(sb.st_gid);
         printf("%-8s %-8s ", pw ? pw->pw_name : "?", gr ? gr->gr_name : "?");
 
-        printf("%8ld ", sb.st_size);
+        printf("%8ld ", (long)sb.st_size);
 
         char timebuf[64];
         struct tm *tm_info = localtime(&sb.st_mtime);
         strftime(timebuf, sizeof(timebuf), "%b %d %H:%M", tm_info);
         printf("%s ", timebuf);
 
-        printf("%s\n", files[i]);
-    }
-
-    for (int i = 0; i < count; i++) free(files[i]);
-    free(files);
-}
-
-/* -------------------- print_columns() -------------------- */
-void print_columns(const char *dir)
-{
-    struct dirent *entry;
-    DIR *dp = opendir(dir);
-    if (!dp)
-    {
-        fprintf(stderr, "Cannot open directory: %s\n", dir);
-        return;
-    }
-
-    char **files = NULL;
-    int count = 0;
-    while ((entry = readdir(dp)) != NULL)
-    {
-        if (entry->d_name[0] == '.')
-            continue;
-        files = realloc(files, sizeof(char*) * (count + 1));
-        files[count] = strdup(entry->d_name);
-        count++;
-    }
-    closedir(dp);
-
-    if (count == 0)
-        return;
-
-    // Sort alphabetically
-    qsort(files, count, sizeof(char*), cmpstringp);
-
-    struct winsize w;
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-    int term_width = w.ws_col ? w.ws_col : 80;
-
-    int maxlen = 0;
-    for (int i = 0; i < count; i++)
-        if ((int)strlen(files[i]) > maxlen) maxlen = strlen(files[i]);
-
-    int spacing = 2;
-    int col_width = maxlen + spacing;
-    int cols = term_width / col_width;
-    if (cols < 1) cols = 1;
-    int rows = (count + cols - 1) / cols;
-
-    for (int r = 0; r < rows; r++)
-    {
-        for (int c = 0; c < cols; c++)
-        {
-            int idx = r + c * rows;
-            if (idx < count)
-                printf("%-*s", col_width, files[idx]);
-        }
+        print_colored_name(dir, files[i]);
         printf("\n");
     }
 
@@ -232,59 +202,125 @@ void print_columns(const char *dir)
     free(files);
 }
 
-/* -------------------- print_horizontal() -------------------- */
-void print_horizontal(const char *dir)
+/* ---------------- columns (down-then-across) ---------------- */
+void print_columns(const char *dir)
 {
-    struct dirent *entry;
     DIR *dp = opendir(dir);
-    if (!dp)
-    {
-        fprintf(stderr, "Cannot open directory: %s\n", dir);
-        return;
-    }
+    if (!dp) { perror("opendir"); return; }
 
+    struct dirent *entry;
     char **files = NULL;
-    int count = 0;
-    while ((entry = readdir(dp)) != NULL)
-    {
-        if (entry->d_name[0] == '.')
-            continue;
-        files = realloc(files, sizeof(char*) * (count + 1));
+    int count = 0, maxlen = 0;
+
+    while ((entry = readdir(dp)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char **tmp = realloc(files, sizeof(char*) * (count + 1));
+        if (!tmp) { perror("realloc"); for (int i=0;i<count;i++) free(files[i]); free(files); closedir(dp); return; }
+        files = tmp;
         files[count] = strdup(entry->d_name);
+        if (!files[count]) { perror("strdup"); for (int i=0;i<count;i++) free(files[i]); free(files); closedir(dp); return; }
+        int len = (int)strlen(files[count]);
+        if (len > maxlen) maxlen = len;
         count++;
     }
     closedir(dp);
+    if (count == 0) return;
 
-    if (count == 0)
-        return;
-
-    // Sort alphabetically
     qsort(files, count, sizeof(char*), cmpstringp);
 
     struct winsize w;
-    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
-    int term_width = w.ws_col ? w.ws_col : 80;
-
-    int maxlen = 0;
-    for (int i = 0; i < count; i++)
-        if ((int)strlen(files[i]) > maxlen) maxlen = strlen(files[i]);
+    int term_width = 80;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) term_width = w.ws_col;
 
     int spacing = 2;
     int col_width = maxlen + spacing;
+    int cols = term_width / col_width;
+    if (cols < 1) cols = 1;
+    int rows = (count + cols - 1) / cols;
 
+    struct stat sb;
+    char path[1024];
+
+    for (int r = 0; r < rows; r++) {
+        for (int c = 0; c < cols; c++) {
+            int idx = r + c * rows;
+            if (idx < count) {
+                snprintf(path, sizeof(path), "%s/%s", dir, files[idx]);
+                if (lstat(path, &sb) == -1) {
+                    /* if stat fails, print plain name */
+                    printf("%-*s", col_width, files[idx]);
+                } else {
+                    /* print colored name then pad */
+                    print_colored_name(dir, files[idx]);
+                    int len = (int)strlen(files[idx]); /* visible length */
+                    int pad = col_width - len;
+                    for (int p = 0; p < pad; p++) putchar(' ');
+                }
+            }
+        }
+        putchar('\n');
+    }
+
+    for (int i = 0; i < count; i++) free(files[i]);
+    free(files);
+}
+
+/* ---------- horizontal (across-then-down) ---------- */
+void print_horizontal(const char *dir)
+{
+    DIR *dp = opendir(dir);
+    if (!dp) { perror("opendir"); return; }
+
+    struct dirent *entry;
+    char **files = NULL;
+    int count = 0, maxlen = 0;
+
+    while ((entry = readdir(dp)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char **tmp = realloc(files, sizeof(char*) * (count + 1));
+        if (!tmp) { perror("realloc"); for (int i=0;i<count;i++) free(files[i]); free(files); closedir(dp); return; }
+        files = tmp;
+        files[count] = strdup(entry->d_name);
+        if (!files[count]) { perror("strdup"); for (int i=0;i<count;i++) free(files[i]); free(files); closedir(dp); return; }
+        int len = (int)strlen(files[count]);
+        if (len > maxlen) maxlen = len;
+        count++;
+    }
+    closedir(dp);
+    if (count == 0) return;
+
+    qsort(files, count, sizeof(char*), cmpstringp);
+
+    struct winsize w;
+    int term_width = 80;
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0 && w.ws_col > 0) term_width = w.ws_col;
+
+    int spacing = 2;
+    int col_width = maxlen + spacing;
     int current_width = 0;
-    for (int i = 0; i < count; i++)
-    {
+
+    struct stat sb;
+    char path[1024];
+
+    for (int i = 0; i < count; i++) {
         int next_width = current_width + col_width;
-        if (next_width > term_width)
-        {
-            printf("\n");
+        if (next_width > term_width) {
+            putchar('\n');
             current_width = 0;
         }
-        printf("%-*s", col_width, files[i]);
-        current_width += col_width;
+        snprintf(path, sizeof(path), "%s/%s", dir, files[i]);
+        if (lstat(path, &sb) == -1) {
+            printf("%-*s", col_width, files[i]);
+            current_width += col_width;
+        } else {
+            print_colored_name(dir, files[i]);
+            int len = (int)strlen(files[i]);
+            int pad = col_width - len;
+            for (int p = 0; p < pad; p++) putchar(' ');
+            current_width += col_width;
+        }
     }
-    printf("\n");
+    putchar('\n');
 
     for (int i = 0; i < count; i++) free(files[i]);
     free(files);
